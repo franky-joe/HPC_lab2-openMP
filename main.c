@@ -1,12 +1,24 @@
 #include "fitsio.h" /* Requerido para usar CFITSIO */
 #include "stdio.h"
 #include "stdlib.h" /* Para malloc y free */
+#include "math.h"   /* Para sqrt y log */
+#include "time.h"   /* Para inicializar la semilla de rand */
+#include "unistd.h" /* Para getopt() */
+#include <omp.h>
+
 
 
 /******************************************************************************
  *                                Utilidades                                  *
  ******************************************************************************/
 
+/* Generar un número aleatorio con distribución normal usando el método de Box-Muller */
+double randn(double mu, double sigma) {
+    double u1 = (double)rand() / RAND_MAX;
+    double u2 = (double)rand() / RAND_MAX;
+    double z0 = sqrt(-2.0 * log(u1)) * cos(2.0 * M_PI * u2);
+    return z0 * sigma + mu;
+}
 
 /* Función para leer la imagen desde un archivo FITS y devolver un puntero a la lista de píxeles */
 double* read_fits_image(const char* filepath, long* naxes, int* status) {
@@ -71,13 +83,105 @@ void write_fits_image(const char* filepath, long* naxes, double* myimage, int* s
     fits_close_file(gptr, status);
 }
 
+/******************************************************************************
+ *                              Pirmer filtro                                 *
+ ******************************************************************************/
 
-int main() {
+
+/******************************************************************************
+ *                              Segundo filtro                                *
+ ******************************************************************************/
+
+/* Filtro de ruido gaussiano */
+void add_gaussian_noise(double* image, long* naxes, double sigma) {
+    long num_pixels = naxes[0] * naxes[1];
+
+    /* Añadir ruido gaussiano de forma paralela */
+    #pragma omp parallel for
+    for (long i = 0; i < num_pixels; i++) {
+        double noise = randn(0, sigma); /* Ruido gaussiano con media 0 y desviación sigma */
+        image[i] += noise;
+    }
+}
+/******************************************************************************
+ *                              Tercer filtro                                 *
+ ******************************************************************************/
+
+/* Filtro de normalización */
+void normalize_image(double* image, long* naxes, double Jmax) {
+    long num_pixels = naxes[0] * naxes[1];
+    double min_val = image[0];
+    double max_val = image[0];
+
+    /* Encontrar los valores mínimo y máximo de la imagen */
+    #pragma omp parallel for reduction(min:min_val) reduction(max:max_val)
+    for (long i = 0; i < num_pixels; i++) {
+        if (image[i] < min_val) {
+            min_val = image[i];
+        }
+        if (image[i] > max_val) {
+            max_val = image[i];
+        }
+    }
+
+    /* Normalizar la imagen */
+    #pragma omp parallel for
+    for (long i = 0; i < num_pixels; i++) {
+        image[i] = ((image[i] - min_val) / (max_val - min_val)) * Jmax;
+    }
+}
+
+int main(int argc, char *argv[]) {
     long naxes[2]; /* Para almacenar las dimensiones de la imagen */
     int status = 0; /* Inicializar estado */
-    
+    char *input_filename = NULL;  /* Nombre del archivo de entrada */
+    char *output_filename = NULL; /* Nombre del archivo de salida */
+    double sigma = 0.0; /* Desviación estándar del ruido */
+    double fraciontheta = 0.0; /* Fracción theta */
+    double Jmax = 0.0; /* Intensidad máxima */
+    int num_threads = 1; /* Número de hilos */
+
+    /* Procesar argumentos con getopt() */
+    int opt;
+    while ((opt = getopt(argc, argv, "i:o:s:t:j:T:")) != -1) {
+        switch (opt) {
+            case 'i':
+                input_filename = optarg;
+                break;
+            case 'o':
+                output_filename = optarg;
+                break;
+            case 's':
+                sigma = atof(optarg);
+                break;
+            case 't':
+                fraciontheta = atof(optarg);
+                break;
+            case 'j':
+                Jmax = atof(optarg);
+                break;
+            case 'T':
+                num_threads = atoi(optarg);
+                break;
+            default:
+                fprintf(stderr, "Uso: %s -i archivo_entrada -o archivo_salida -s sigma -t fraciontheta -j intensidad -T numerohebras\n", argv[0]);
+                exit(EXIT_FAILURE);
+        }
+    }
+
+    if (input_filename == NULL || output_filename == NULL || sigma == 0.0 || Jmax == 0.0 || fraciontheta == 0.0) {
+        fprintf(stderr, "Todos los parámetros son obligatorios.\n");
+        exit(EXIT_FAILURE);
+    }
+
+    /* Configurar el número de hilos con OpenMP */
+    omp_set_num_threads(num_threads);
+
+    /* Inicializar la semilla para generar números aleatorios */
+    srand(time(NULL));
+
     /* Leer la imagen desde un archivo FITS */
-    double* myimage = read_fits_image("imagein1.fits", naxes, &status);
+    double* myimage = read_fits_image(input_filename, naxes, &status);
     if (myimage == NULL) {
         printf("Error al leer la imagen\n");
         return status;
@@ -86,22 +190,14 @@ int main() {
     /* Imprimir las dimensiones de la imagen */
     printf("Tamaño de la imagen: (%ld, %ld)\n", naxes[1], naxes[0]);
 
-    /* Imprimir los píxeles de la imagen */
-    for (int ii = 0; ii < naxes[1]; ii++) {
-        for (int jj = 0; jj < naxes[0]; jj++) {
-            printf("%.10e ", myimage[ii * naxes[0] + jj]);
-        }
-        printf("\n"); /* Imprimir una nueva línea al final de cada fila */
-    }
+    /* Aplicar el filtro de ruido gaussiano */
+    add_gaussian_noise(myimage, naxes, sigma);
 
-    /* Realizar alguna modificación en la imagen (opcional) */
-    for (int i = 0; i < naxes[0] * naxes[1]; i++) {
-        if (myimage[i] <= 4e-8)
-            myimage[i] = 0;
-    }
+    /* Aplicar la normalización */
+    normalize_image(myimage, naxes, Jmax);
 
     /* Escribir la imagen modificada en un nuevo archivo FITS */
-    write_fits_image("salida2.fits", naxes, myimage, &status);
+    write_fits_image(output_filename, naxes, myimage, &status);
     if (status) {
         printf("Error al escribir la imagen\n");
     }

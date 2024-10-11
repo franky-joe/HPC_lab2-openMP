@@ -1,0 +1,1 @@
+./lab2 -i image4096.fits -o 2.fits -s 5e-8 -t 0.92 -j 0.003 -T 6

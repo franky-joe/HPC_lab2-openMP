@@ -2,10 +2,10 @@
 CC = gcc
 
 # Flags de compilación
-CFLAGS = -Wall -O2
+CFLAGS = -Wall -O2 -fopenmp 
 
-# Librerías necesarias (cfitsio)
-LIBS = -lcfitsio
+# Librerías necesarias (cfitsio, matemática)
+LIBS = -lcfitsio -lm
 
 # Archivo de salida
 TARGET = lab2
