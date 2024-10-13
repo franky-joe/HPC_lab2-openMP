@@ -63,8 +63,11 @@ void write_fits_image(const char* filepath, long* naxes, double* myimage, int* s
     fitsfile *gptr;
     long fpixel = 1;
     
-    /* Crear un nuevo archivo FITS con la opción de sobrescribir si existe */
-    fits_create_file(&gptr, filepath, status);
+    /* Crear un nuevo archivo FITS con la opción de sobrescribir si existe. */
+    char overwrite_filepath[256];
+    snprintf(overwrite_filepath, sizeof(overwrite_filepath), "!%s", filepath);
+    fits_create_file(&gptr, overwrite_filepath, status);
+
     if (*status) {
         printf("Error al crear el archivo: %s\n", filepath);
         return;
@@ -100,16 +103,31 @@ void create_gaussian_kernel(double* kernel, int kernel_size, double sigma, doubl
     double b = sin(2.0 * theta) / (4.0 * sigma_sq);
     double c = sin_theta * sin_theta / (2.0 * sigma_sq) + cos_theta * cos_theta / (2.0 * sigma_sq);
 
-    /* Llenar el kernel con los valores Gaussianos */
+    /* Inicializar la suma */
     double sum = 0.0;
-    for (int x = -mid; x <= mid; x++) {
-        for (int y = -mid; y <= mid; y++) {
-            kernel[(x + mid) * kernel_size + (y + mid)] = exp(-(a * x * x + 2 * b * x * y + c * y * y));
-            sum += kernel[(x + mid) * kernel_size + (y + mid)];
+
+    /* Calcular los valores del kernel */
+    #pragma omp parallel
+    {
+        /* Cada hebra tendrá su propia suma parcial */
+        double sum_local = 0.0;
+
+        #pragma omp for collapse(2) schedule(static)
+        for (int x = -mid; x <= mid; x++) {
+            for (int y = -mid; y <= mid; y++) {
+                int idx = (x + mid) * kernel_size + (y + mid);
+                kernel[idx] = exp(-(a * x * x + 2 * b * x * y + c * y * y));
+                sum_local += kernel[idx];  /* Acumular en la suma local */
+            }
         }
+
+        /* Reducir la suma parcial de cada hebra en la variable global */
+        #pragma omp atomic
+        sum += sum_local;
     }
 
-    /* Normalizar el kernel para que la suma sea 1 */
+    /* Normalizar el kernel en paralelo */
+    #pragma omp parallel for
     for (int i = 0; i < kernel_size * kernel_size; i++) {
         kernel[i] /= sum;
     }
@@ -194,7 +212,7 @@ int main(int argc, char *argv[]) {
     double sigma = 0.0; /* Desviación estándar del ruido */
     double fraciontheta = 0.0; /* Fracción theta */
     double Jmax = 0.0; /* Intensidad máxima */
-    int num_threads = 1; /* Número de hilos */
+    int num_threads = 1; /* Número de hebras */
 
     /* Procesar argumentos con getopt() */
     int opt;
@@ -229,7 +247,7 @@ int main(int argc, char *argv[]) {
         exit(EXIT_FAILURE);
     }
 
-    /* Configurar el número de hilos con OpenMP */
+    /* Configurar el número de hebras con OpenMP */
     omp_set_num_threads(num_threads);
 
     /* Inicializar la semilla para generar números aleatorios */
