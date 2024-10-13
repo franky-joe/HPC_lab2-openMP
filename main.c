@@ -5,8 +5,7 @@
 #include "time.h"   /* Para inicializar la semilla de rand */
 #include "unistd.h" /* Para getopt() */
 #include <omp.h>
-
-
+#include <string.h>
 
 /******************************************************************************
  *                                Utilidades                                  *
@@ -56,7 +55,6 @@ double* read_fits_image(const char* filepath, long* naxes, int* status) {
     return myimage;
 }
 
-
 /* Función para escribir una imagen en un archivo FITS */
 void write_fits_image(const char* filepath, long* naxes, double* myimage, int* status) {
     fitsfile *gptr;
@@ -84,9 +82,62 @@ void write_fits_image(const char* filepath, long* naxes, double* myimage, int* s
 }
 
 /******************************************************************************
- *                              Pirmer filtro                                 *
+ *                              Primer filtro                                 *
  ******************************************************************************/
 
+/* Función para crear el kernel Gaussiano */
+void create_gaussian_kernel(double* kernel, int kernel_size, double sigma, double theta) {
+    int mid = kernel_size / 2;
+    double sigma_sq = sigma * sigma;
+    double cos_theta = cos(theta);
+    double sin_theta = sin(theta);
+
+    /* Variables para la rotación del kernel */
+    double a = cos_theta * cos_theta / (2.0 * sigma_sq) + sin_theta * sin_theta / (2.0 * sigma_sq);
+    double b = sin(2.0 * theta) / (4.0 * sigma_sq);
+    double c = sin_theta * sin_theta / (2.0 * sigma_sq) + cos_theta * cos_theta / (2.0 * sigma_sq);
+
+    /* Llenar el kernel con los valores Gaussianos */
+    double sum = 0.0;
+    for (int x = -mid; x <= mid; x++) {
+        for (int y = -mid; y <= mid; y++) {
+            kernel[(x + mid) * kernel_size + (y + mid)] = exp(-(a * x * x + 2 * b * x * y + c * y * y));
+            sum += kernel[(x + mid) * kernel_size + (y + mid)];
+        }
+    }
+
+    /* Normalizar el kernel para que la suma sea 1 */
+    for (int i = 0; i < kernel_size * kernel_size; i++) {
+        kernel[i] /= sum;
+    }
+}
+
+/* Función para aplicar la convolución Gaussiana */
+void gaussian_convolution(double* image, double* output, long* naxes, double* kernel, int kernel_size) {
+    int mid = kernel_size / 2;
+    long width = naxes[0];
+    long height = naxes[1];
+
+    /* Convolución de la imagen con el kernel Gaussiano */
+    #pragma omp parallel for collapse(2)
+    for (long x = 0; x < width; x++) {
+        for (long y = 0; y < height; y++) {
+            double sum = 0.0;
+            for (int i = -mid; i <= mid; i++) {
+                for (int j = -mid; j <= mid; j++) {
+                    long xi = x + i;
+                    long yj = y + j;
+
+                    /* Considerar el borde de la imagen */
+                    if (xi >= 0 && xi < width && yj >= 0 && yj < height) {
+                        sum += image[xi * width + yj] * kernel[(i + mid) * kernel_size + (j + mid)];
+                    }
+                }
+            }
+            output[x * width + y] = sum;
+        }
+    }
+}
 
 /******************************************************************************
  *                              Segundo filtro                                *
@@ -103,6 +154,7 @@ void add_gaussian_noise(double* image, long* naxes, double sigma) {
         image[i] += noise;
     }
 }
+
 /******************************************************************************
  *                              Tercer filtro                                 *
  ******************************************************************************/
@@ -189,6 +241,28 @@ int main(int argc, char *argv[]) {
 
     /* Imprimir las dimensiones de la imagen */
     printf("Tamaño de la imagen: (%ld, %ld)\n", naxes[1], naxes[0]);
+
+    /* Parámetros del kernel Gaussiano */
+    int kernel_size = 27;
+    double sigma_kernel = 3.5;
+    double theta_kernel = fraciontheta * M_PI;
+
+    /* Crear el kernel Gaussiano */
+    double* kernel = (double*) malloc(kernel_size * kernel_size * sizeof(double));
+    create_gaussian_kernel(kernel, kernel_size, sigma_kernel, theta_kernel);
+
+    /* Crear la imagen de salida para la convolución */
+    double* smoothed_image = (double*) malloc(naxes[0] * naxes[1] * sizeof(double));
+
+    /* Aplicar la convolución Gaussiana (paralelizada con OpenMP) */
+    gaussian_convolution(myimage, smoothed_image, naxes, kernel, kernel_size);
+
+    /* Liberar la memoria del kernel */
+    free(kernel);
+
+    /* Reemplazar la imagen original con la suavizada */
+    memcpy(myimage, smoothed_image, naxes[0] * naxes[1] * sizeof(double));
+    free(smoothed_image);
 
     /* Aplicar el filtro de ruido gaussiano */
     add_gaussian_noise(myimage, naxes, sigma);
