@@ -11,7 +11,7 @@ LIBS = -lcfitsio -lm
 TARGET = lab2
 
 # Nombre del archivo fuente
-SRC = main.c
+SRC = lab2.c
 
 # Regla para compilar el programa
 $(TARGET): $(SRC)
